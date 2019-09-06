@@ -9,7 +9,23 @@ use Elasticsearch\ClientBuilder as ElasticBuilder;
 class ElasticsearchProvider extends ServiceProvider
 {
     /**
+     * Register any application services.
+     *
+     * @return void
+     */
+    public function register()
+    {
+        $this->app->bind(\Elasticsearch\Client::class, function () {
+            return ElasticBuilder::create()
+                ->setHosts(config('scout.elasticsearch.hosts'))
+                ->build();
+        });
+    }
+
+    /**
      * Bootstrap the application services.
+     *
+     * @return void
      */
     public function boot()
     {
@@ -17,7 +33,8 @@ class ElasticsearchProvider extends ServiceProvider
             return new ElasticsearchEngine(ElasticBuilder::create()
                 ->setHosts(config('scout.elasticsearch.hosts'))
                 ->build(),
-                config('scout.elasticsearch.index')
+                config('scout.elasticsearch.index'),
+                config('scout.soft_delete')
             );
         });
     }

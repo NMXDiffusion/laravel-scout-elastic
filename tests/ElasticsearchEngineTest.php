@@ -1,7 +1,7 @@
 <?php
 
-use Illuminate\Database\Eloquent\Collection;
 use Laravel\Scout\Builder;
+use Illuminate\Database\Eloquent\Collection;
 use ScoutEngines\Elasticsearch\ElasticsearchEngine;
 
 class ElasticsearchEngineTest extends PHPUnit_Framework_TestCase
@@ -18,16 +18,16 @@ class ElasticsearchEngineTest extends PHPUnit_Framework_TestCase
             'body' => [
                 [
                     'update' => [
-                        '_id' => 1,
+                        '_id'    => 1,
                         '_index' => 'scout',
-                        '_type' => 'table',
-                    ]
+                        '_type'  => 'table',
+                    ],
                 ],
                 [
-                    'doc' => ['id' => 1 ],
-                    'doc_as_upsert' => true
-                ]
-            ]
+                    'doc'           => ['id' => 1],
+                    'doc_as_upsert' => true,
+                ],
+            ],
         ]);
 
         $engine = new ElasticsearchEngine($client, 'scout');
@@ -41,12 +41,12 @@ class ElasticsearchEngineTest extends PHPUnit_Framework_TestCase
             'body' => [
                 [
                     'delete' => [
-                        '_id' => 1,
+                        '_id'    => 1,
                         '_index' => 'scout',
-                        '_type' => 'table',
-                    ]
+                        '_type'  => 'table',
+                    ],
                 ],
-            ]
+            ],
         ]);
 
         $engine = new ElasticsearchEngine($client, 'scout');
@@ -58,21 +58,31 @@ class ElasticsearchEngineTest extends PHPUnit_Framework_TestCase
         $client = Mockery::mock('Elasticsearch\Client');
         $client->shouldReceive('search')->with([
             'index' => 'scout',
-            'type' => 'table',
-            'body' => [
+            'type'  => 'table',
+            'body'  => [
                 'query' => [
                     'bool' => [
-                        'must' => [
-                            ['query_string' => ['query' => '*zonda*']],
+                        'must'   => [
+                            'function_score' => [
+                                'query' => [
+                                    'multi_match' => [
+                                        'query'     => 'zonda',
+                                        'fuzziness' => 'auto',
+                                        'operator'  => 'or',
+                                    ],
+                                ],
+                            ],
+                        ],
+                        'filter' => [
                             ['match_phrase' => ['foo' => 1]],
                             ['terms' => ['bar' => [1, 3]]],
-                        ]
-                    ]
+                        ],
+                    ],
                 ],
-                'sort' => [
-                    ['id' => 'desc']
-                ]
-            ]
+                'sort'  => [
+                    ['id' => 'desc'],
+                ],
+            ],
         ]);
 
         $engine = new ElasticsearchEngine($client, 'scout');
@@ -80,6 +90,38 @@ class ElasticsearchEngineTest extends PHPUnit_Framework_TestCase
         $builder->where('foo', 1);
         $builder->where('bar', [1, 3]);
         $builder->orderBy('id', 'desc');
+        $engine->search($builder);
+    }
+
+    public function test_model_can_specify_fields_to_search()
+    {
+        $client = Mockery::mock('Elasticsearch\Client');
+        $client->shouldReceive('search')->with([
+            'index' => 'scout',
+            'type'  => 'table',
+            'body'  => [
+                'query' => [
+                    'bool' => [
+                        'must'   => [
+                            'function_score' => [
+                                'query' => [
+                                    'multi_match' => [
+                                        'query'     => 'zonda',
+                                        'fuzziness' => 'auto',
+                                        'operator'  => 'or',
+                                        'fields'    => ['id'],
+                                    ],
+                                ],
+                            ],
+                        ],
+                        'filter' => [],
+                    ],
+                ],
+            ],
+        ]);
+
+        $engine = new ElasticsearchEngine($client, 'scout');
+        $builder = new Laravel\Scout\Builder(new ElasticsearchEngineTestModelWithSearchableFields, 'zonda');
         $engine->search($builder);
     }
 
@@ -114,18 +156,19 @@ class ElasticsearchEngineTest extends PHPUnit_Framework_TestCase
 
         $model = Mockery::mock('Illuminate\Database\Eloquent\Model');
         $model->shouldReceive('getScoutKey')->andReturn('1');
-        $model->shouldReceive('getScoutModelsByIds')->once()->with($builder, ['1'])->andReturn($models = Collection::make([$model]));
+        $model->shouldReceive('getScoutModelsByIds')->once()->with($builder,
+            ['1'])->andReturn($models = Collection::make([$model]));
         $model->shouldReceive('newCollection')->andReturn($models);
 
         $results = $engine->map($builder, [
             'hits' => [
                 'total' => '1',
-                'hits' => [
+                'hits'  => [
                     [
-                        '_id' => '1'
-                    ]
-                ]
-            ]
+                        '_id' => '1',
+                    ],
+                ],
+            ],
         ], $model);
 
         $this->assertEquals(1, count($results));
@@ -153,4 +196,44 @@ class ElasticsearchEngineTestModel extends \Illuminate\Database\Eloquent\Model
     {
         return ['id' => 1];
     }
+
+    public function scoutMetadata()
+    {
+        return [];
+    }
+}
+
+class ElasticsearchEngineTestModelWithSearchableFields extends \Illuminate\Database\Eloquent\Model
+{
+    public function getIdAttribute()
+    {
+        return 1;
+    }
+
+    public function searchableAs()
+    {
+        return 'table';
+    }
+
+    public function toSearchableArray()
+    {
+        return ['id' => 1];
+    }    public function getKey()
+    {
+        return '1';
+    }
+
+    public function scoutMetadata()
+    {
+        return [];
+    }
+
+    public function searchableFields()
+    {
+        return [
+            'id',
+        ];
+    }
+
+
 }

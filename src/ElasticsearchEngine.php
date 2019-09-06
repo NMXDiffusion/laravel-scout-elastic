@@ -6,6 +6,7 @@ use Laravel\Scout\Builder;
 use Laravel\Scout\Engines\Engine;
 use Elasticsearch\Client as Elastic;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class ElasticsearchEngine extends Engine
 {
@@ -15,7 +16,7 @@ class ElasticsearchEngine extends Engine
      * @var string
      */
     protected $index;
-    
+
     /**
      * Elastic where the instance of Elastic|\Elasticsearch\Client is stored.
      *
@@ -24,39 +25,51 @@ class ElasticsearchEngine extends Engine
     protected $elastic;
 
     /**
+     * Determines if soft deletes for Scout are enabled or not.
+     *
+     * @var bool
+     */
+    protected $softDelete;
+
+    /**
      * Create a new engine instance.
      *
-     * @param  \Elasticsearch\Client  $elastic
-     * @return void
+     * @param \Elasticsearch\Client $elastic
+     * @param string                $index
+     * @param bool                  $softDelete
      */
-    public function __construct(Elastic $elastic, $index)
+    public function __construct(Elastic $elastic, $index, $softDelete = false)
     {
         $this->elastic = $elastic;
         $this->index = $index;
+        $this->softDelete = $softDelete;
     }
 
     /**
      * Update the given model in the index.
      *
-     * @param  Collection  $models
+     * @param Collection $models
      * @return void
      */
     public function update($models)
     {
         $params['body'] = [];
 
-        $models->each(function($model) use (&$params)
-        {
+        if ($this->usesSoftDelete($models->first()) && $this->softDelete) {
+            $models->each->pushSoftDeleteMetadata();
+        }
+
+        $models->each(function ($model) use (&$params) {
             $params['body'][] = [
                 'update' => [
-                    '_id' => $model->getKey(),
+                    '_id'    => $model->getKey(),
                     '_index' => $this->index,
-                    '_type' => $model->searchableAs(),
-                ]
+                    '_type'  => $model->searchableAs(),
+                ],
             ];
             $params['body'][] = [
-                'doc' => $model->toSearchableArray(),
-                'doc_as_upsert' => true
+                'doc'           => array_merge($model->toSearchableArray(), $model->scoutMetadata()),
+                'doc_as_upsert' => true,
             ];
         });
 
@@ -66,21 +79,20 @@ class ElasticsearchEngine extends Engine
     /**
      * Remove the given model from the index.
      *
-     * @param  Collection  $models
+     * @param Collection $models
      * @return void
      */
     public function delete($models)
     {
         $params['body'] = [];
 
-        $models->each(function($model) use (&$params)
-        {
+        $models->each(function ($model) use (&$params) {
             $params['body'][] = [
                 'delete' => [
-                    '_id' => $model->getKey(),
+                    '_id'    => $model->getKey(),
                     '_index' => $this->index,
-                    '_type' => $model->searchableAs(),
-                ]
+                    '_type'  => $model->searchableAs(),
+                ],
             ];
         });
 
@@ -90,58 +102,138 @@ class ElasticsearchEngine extends Engine
     /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $builder
+     * @param Builder $builder
      * @return mixed
      */
     public function search(Builder $builder)
     {
         return $this->performSearch($builder, array_filter([
             'numericFilters' => $this->filters($builder),
-            'size' => $builder->limit,
+            'size'           => $builder->limit,
         ]));
     }
 
     /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $builder
-     * @param  int  $perPage
-     * @param  int  $page
+     * @param Builder $builder
+     * @param int     $perPage
+     * @param int     $page
      * @return mixed
      */
     public function paginate(Builder $builder, $perPage, $page)
     {
         $result = $this->performSearch($builder, [
             'numericFilters' => $this->filters($builder),
-            'from' => (($page * $perPage) - $perPage),
-            'size' => $perPage,
+            'from'           => (($page * $perPage) - $perPage),
+            'size'           => $perPage,
         ]);
 
-       $result['nbPages'] = $result['hits']['total']/$perPage;
+        $result['nbPages'] = $result['hits']['total'] / $perPage;
 
         return $result;
     }
 
     /**
+     * Pluck and return the primary keys of the given results.
+     *
+     * @param mixed $results
+     * @return \Illuminate\Support\Collection
+     */
+    public function mapIds($results)
+    {
+        return collect($results['hits']['hits'])->pluck('_id')->values();
+    }
+
+    /**
+     * Map the given results to instances of the given model.
+     *
+     * @param \Laravel\Scout\Builder              $builder
+     * @param mixed                               $results
+     * @param \Illuminate\Database\Eloquent\Model $model
+     * @return Collection
+     */
+    public function map(Builder $builder, $results, $model)
+    {
+        if ($results['hits']['total'] === 0) {
+            return $model->newCollection();
+        }
+
+        $keys = collect($results['hits']['hits'])->pluck('_id')->values()->all();
+        $keysPotition = array_flip($keys);
+
+        return $model->getScoutModelsByIds(
+            $builder, $keys
+        )->filter(function ($model) use ($keys) {
+            return in_array($model->getScoutKey(), $keys);
+        })->sortBy(function ($model) use ($keysPotition) {
+            return $keysPotition[$model->getScoutKey()];
+        })->values();
+    }
+
+    /**
+     * Get the total count from a raw result returned by the engine.
+     *
+     * @param mixed $results
+     * @return int
+     */
+    public function getTotalCount($results)
+    {
+        return $results['hits']['total'];
+    }
+
+    /**
+     * Flush all of the model's records from the engine.
+     *
+     * @param \Illuminate\Database\Eloquent\Model $model
+     * @return void
+     */
+    public function flush($model)
+    {
+        $model->newQuery()
+            ->orderBy($model->getKeyName())
+            ->unsearchable();
+    }
+
+    /**
      * Perform the given search on the engine.
      *
-     * @param  Builder  $builder
-     * @param  array  $options
+     * @param Builder $builder
+     * @param array   $options
      * @return mixed
      */
     protected function performSearch(Builder $builder, array $options = [])
     {
         $params = [
             'index' => $this->index,
-            'type' => $builder->index ?: $builder->model->searchableAs(),
-            'body' => [
+            'type'  => $builder->index ?: $builder->model->searchableAs(),
+            'body'  => [
                 'query' => [
                     'bool' => [
-                        'must' => [['query_string' => [ 'query' => "*{$builder->query}*"]]]
-                    ]
-                ]
-            ]
+                        'must'   => [
+                            'function_score' => [
+                                'query' => [
+                                    'multi_match' => [
+                                        'query'     => $builder->query,
+                                        'fuzziness' => 'auto',
+                                        'operator'  => 'or',
+                                    ],
+                                ],
+                            ],
+                        ],
+                        'filter' => [],
+                    ],
+                ],
+            ],
         ];
+
+        if (method_exists($builder->model, 'searchableFields')) {
+            data_set(
+                $params,
+                'body.query.bool.must.function_score.query.multi_match.fields',
+                $builder->model->searchableFields()
+            );
+        }
 
         if ($sort = $this->sort($builder)) {
             $params['body']['sort'] = $sort;
@@ -156,8 +248,9 @@ class ElasticsearchEngine extends Engine
         }
 
         if (isset($options['numericFilters']) && count($options['numericFilters'])) {
-            $params['body']['query']['bool']['must'] = array_merge($params['body']['query']['bool']['must'],
-                $options['numericFilters']);
+            $params['body']['query']['bool']['filter'] = array_merge(
+                $params['body']['query']['bool']['filter'], $options['numericFilters']
+            );
         }
 
         if ($builder->callback) {
@@ -175,7 +268,7 @@ class ElasticsearchEngine extends Engine
     /**
      * Get the filter array for the query.
      *
-     * @param  Builder  $builder
+     * @param Builder $builder
      * @return array
      */
     protected function filters(Builder $builder)
@@ -190,67 +283,9 @@ class ElasticsearchEngine extends Engine
     }
 
     /**
-     * Pluck and return the primary keys of the given results.
-     *
-     * @param  mixed  $results
-     * @return \Illuminate\Support\Collection
-     */
-    public function mapIds($results)
-    {
-        return collect($results['hits']['hits'])->pluck('_id')->values();
-    }
-
-    /**
-     * Map the given results to instances of the given model.
-     *
-     * @param  \Laravel\Scout\Builder  $builder
-     * @param  mixed  $results
-     * @param  \Illuminate\Database\Eloquent\Model  $model
-     * @return Collection
-     */
-    public function map(Builder $builder, $results, $model)
-    {
-        if ($results['hits']['total'] === 0) {
-            return $model->newCollection();
-        }
-
-        $keys = collect($results['hits']['hits'])->pluck('_id')->values()->all();
-
-        return $model->getScoutModelsByIds(
-                $builder, $keys
-            )->filter(function ($model) use ($keys) {
-                return in_array($model->getScoutKey(), $keys);
-            });
-    }
-
-    /**
-     * Get the total count from a raw result returned by the engine.
-     *
-     * @param  mixed  $results
-     * @return int
-     */
-    public function getTotalCount($results)
-    {
-        return $results['hits']['total'];
-    }
-
-    /**
-     * Flush all of the model's records from the engine.
-     *
-     * @param  \Illuminate\Database\Eloquent\Model  $model
-     * @return void
-     */
-    public function flush($model)
-    {
-        $model->newQuery()
-            ->orderBy($model->getKeyName())
-            ->unsearchable();
-    }
-
-    /**
      * Generates the sort if theres any.
      *
-     * @param  Builder $builder
+     * @param Builder $builder
      * @return array|null
      */
     protected function sort($builder)
@@ -259,8 +294,19 @@ class ElasticsearchEngine extends Engine
             return null;
         }
 
-        return collect($builder->orders)->map(function($order) {
+        return collect($builder->orders)->map(function ($order) {
             return [$order['column'] => $order['direction']];
         })->toArray();
+    }
+
+    /**
+     * Determine if the given model uses soft deletes.
+     *
+     * @param \Illuminate\Database\Eloquent\Model $model
+     * @return bool
+     */
+    protected function usesSoftDelete($model)
+    {
+        return in_array(SoftDeletes::class, class_uses_recursive($model));
     }
 }
