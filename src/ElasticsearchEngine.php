@@ -211,14 +211,10 @@ class ElasticsearchEngine extends Engine
                 'query' => [
                     'bool' => [
                         'must'   => [
-                            'function_score' => [
-                                'query' => [
-                                    'multi_match' => [
-                                        'query'     => $builder->query,
-                                        'fuzziness' => 'auto',
-                                        'operator'  => 'or',
-                                    ],
-                                ],
+                            'multi_match' => [
+                                'query'     => $builder->query,
+                                'fuzziness' => 'auto',
+                                'operator'  => 'and',
                             ],
                         ],
                         'filter' => [],
@@ -227,10 +223,14 @@ class ElasticsearchEngine extends Engine
             ],
         ];
 
-        if (method_exists($builder->model, 'searchableFields')) {
+        if (! $builder->query) {
+            unset($params['body']['query']['bool']['must']);
+        }
+
+        if ($builder->query && method_exists($builder->model, 'searchableFields')) {
             data_set(
                 $params,
-                'body.query.bool.must.function_score.query.multi_match.fields',
+                'body.query.bool.must.multi_match.fields',
                 $builder->model->searchableFields()
             );
         }
@@ -275,7 +275,7 @@ class ElasticsearchEngine extends Engine
     {
         return collect($builder->wheres)->map(function ($value, $key) {
             if (is_array($value)) {
-                return ['terms' => [$key => $value]];
+                return ['terms' => ["{$key}.keyword" => $value]];
             }
 
             return ['match_phrase' => [$key => $value]];
