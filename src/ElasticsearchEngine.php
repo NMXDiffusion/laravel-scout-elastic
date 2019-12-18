@@ -275,7 +275,7 @@ class ElasticsearchEngine extends Engine
     {
         return collect($builder->wheres)->map(function ($value, $key) {
             if (is_array($value)) {
-                return ['terms' => ["{$key}.keyword" => $value]];
+                return ['terms' => [$key => $value]];
             }
 
             return ['match_phrase' => [$key => $value]];
